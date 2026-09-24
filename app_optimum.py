@@ -29,31 +29,27 @@ if 'current_email' not in st.session_state:
 if 'master_df' not in st.session_state:
     st.session_state['master_df'] = None
 
-# Función robusta para procesar el CSV de Repcard y rescatar direcciones vacías
+# Función robusta para procesar el CSV de Repcard
 def procesar_csv_repcard(uploaded_file):
     df_raw = pd.read_csv(uploaded_file, low_memory=False)
     
     if 'Appointment Date/Time (Local Time)' in df_raw.columns and 'Latitude' in df_raw.columns:
         processed_df = pd.DataFrame()
         
-        # Fecha y hora local
         dt_local = pd.to_datetime(df_raw['Appointment Date/Time (Local Time)'], errors='coerce')
         processed_df['Fecha_Visita'] = dt_local.dt.strftime('%Y-%m-%d').fillna('2026-09-24')
         processed_df['Hora_Visita'] = dt_local.dt.strftime('%H:%M').fillna('09:00')
         
-        # Cerrador
         closer_first = df_raw['Closer First Name'].fillna('') if 'Closer First Name' in df_raw.columns else ''
         closer_last = df_raw['Closer Last Name'].fillna('') if 'Closer Last Name' in df_raw.columns else ''
         processed_df['Cerrador_Asignado'] = (closer_first + ' ' + closer_last).str.strip()
         processed_df['Cerrador_Asignado'] = processed_df['Cerrador_Asignado'].replace('', 'Juan Lopez')
         
-        # Cliente
         fname = df_raw['First Name'].fillna('') if 'First Name' in df_raw.columns else ''
         lname = df_raw['Last Name'].fillna('') if 'Last Name' in df_raw.columns else ''
         processed_df['Nombre_Cliente'] = (fname + ' ' + lname).str.strip()
         processed_df['Nombre_Cliente'] = processed_df['Nombre_Cliente'].replace('', 'Cliente Repcard')
         
-        # Rescate inteligente de dirección (si Appt Address está vacía, busca en Contact Address o Title)
         appt_addr = df_raw['Appointment Address'].fillna('') if 'Appointment Address' in df_raw.columns else pd.Series(['']*len(df_raw))
         contact_addr = df_raw['Contact Address'].fillna('') if 'Contact Address' in df_raw.columns else pd.Series(['']*len(df_raw))
         appt_title = df_raw['Appointment Title'].fillna('') if 'Appointment Title' in df_raw.columns else pd.Series(['']*len(df_raw))
@@ -67,16 +63,14 @@ def procesar_csv_repcard(uploaded_file):
             elif str(t).strip() and str(t).lower() != 'nan':
                 direcciones.append(str(t).strip())
             else:
-                direcciones.append('Houston, TX') # Respaldo operativo
+                direcciones.append('Houston, TX')
         
         processed_df['Direccion_Completa'] = direcciones
         processed_df['Telefono_Principal'] = df_raw.get('Phone', 'N/A')
         
-        # Coordenadas reales
         processed_df['lat'] = pd.to_numeric(df_raw['Latitude'], errors='coerce')
         processed_df['lon'] = pd.to_numeric(df_raw['Longitude'], errors='coerce')
         
-        # Si por alguna razón la coordenada viene vacía, asignamos un respaldo temporal en Houston para que no rompa el mapa
         processed_df['lat'] = processed_df['lat'].fillna(29.7604)
         processed_df['lon'] = processed_df['lon'].fillna(-95.3698)
         
@@ -84,7 +78,15 @@ def procesar_csv_repcard(uploaded_file):
     else:
         return df_raw
 
-# Función para crear iconos SVG con el número perfectamente centrado
+# Precarga automática del archivo de Repcard por defecto desde el repositorio
+if st.session_state['master_df'] is None:
+    default_csv = "Appointment list Sep-24-2026 to Sep-26-2026.csv"
+    if os.path.exists(default_csv):
+        try:
+            st.session_state['master_df'] = procesar_csv_repcard(default_csv)
+        except Exception:
+            pass
+
 def crear_icono_svg(numero):
     svg_content = f"""<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
         <circle cx="24" cy="24" r="20" fill="#b59e67" stroke="#1a2332" stroke-width="4"/>
@@ -168,7 +170,7 @@ with st.sidebar:
     uploaded_file = None
     if is_admin:
         st.subheader("⚙️ Panel de Administración")
-        uploaded_file = st.file_uploader("Subir Reporte Nativo Repcard (CSV)", type=["csv"], key="repcard_uploader_v2")
+        uploaded_file = st.file_uploader("Actualizar Reporte Repcard (CSV)", type=["csv"], key="repcard_uploader_v3")
         st.markdown("---")
     else:
         uploaded_file = None
@@ -193,7 +195,7 @@ with st.sidebar:
 
 if is_admin and uploaded_file is not None:
     st.session_state['master_df'] = procesar_csv_repcard(uploaded_file)
-    st.success("¡Reporte de Repcard procesado y normalizado con éxito!")
+    st.success("¡Reporte de Repcard actualizado con éxito!")
 
 # Cabecera principal
 st.markdown("""
@@ -208,7 +210,7 @@ df = st.session_state['master_df']
 if df is None or len(df) == 0:
     st.warning("⚠️ **Sistema en Espera de Datos:** No hay rutas cargadas actualmente.")
     if is_admin:
-        st.info("💡 Como Administrador, suba el archivo CSV exportado directamente desde **Repcard** en el panel lateral.")
+        st.info("💡 Como Administrador, suba el archivo CSV exportado desde **Repcard** en el panel lateral.")
     else:
         st.markdown("### El Administrador aún no ha cargado las rutas del día.")
 else:
