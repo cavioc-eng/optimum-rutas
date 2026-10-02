@@ -8,7 +8,7 @@ import math
 
 # Page Configuration
 st.set_page_config(
-    page_title="Optimum Home - Door-to-Door Route Planner",
+    page_title="Optimum Home - Field Door-to-Door Route Planner",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -229,9 +229,8 @@ if is_admin and uploaded_file is not None:
     filename = uploaded_file.name
     with open(filename, "wb") as f:
         f.write(uploaded_file.getbuffer())
-    st.session_state['master_df'] = procesar_archivo_datos(filename)
+    st.session_state['master_df'] = procesar_archivo_datos(uploaded_file)
     st.success("Zone leads list successfully updated and globally synced!")
-    st.rerun()
 
 # Main Header
 st.markdown("""
