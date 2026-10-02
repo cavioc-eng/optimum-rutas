@@ -4,15 +4,16 @@ import os
 import pydeck as pdk
 import base64
 import re
+import math
 
 # Page Configuration
 st.set_page_config(
-    page_title="Optimum Home - Route Planner",
+    page_title="Optimum Home - Door-to-Door Route Planner",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Authorized Users Database (Includes Martez Geddis)
+# Authorized Users Database (Includes Adrion Jones, Martez Geddis, Carlos, Juan, Pedro, Derek)
 if 'USERS_DB' not in st.session_state:
     st.session_state['USERS_DB'] = {
         "juan.lopez@optimumhome.org": {"name": "Juan Lopez", "role": "admin", "phone": "8329813911", "pass": "Optimum2026*"},
@@ -23,7 +24,6 @@ if 'USERS_DB' not in st.session_state:
         "martez.geddis@optimumhome.org": {"name": "Martez Geddis", "role": "closer", "phone": "2103473160", "pass": "Optimum2026*"}
     }
 
-# Session State Initialization
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
 if 'current_email' not in st.session_state:
@@ -31,80 +31,83 @@ if 'current_email' not in st.session_state:
 if 'master_df' not in st.session_state:
     st.session_state['master_df'] = None
 
-# Robust Repcard CSV Processor with Smart Address Rescue
-def procesar_csv_repcard(uploaded_file):
-    df_raw = pd.read_csv(uploaded_file, low_memory=False)
+# Robust Processor for Excel (.xlsx) and CSV files
+def procesar_archivo_datos(uploaded_file):
+    filename = uploaded_file.name if hasattr(uploaded_file, 'name') else str(uploaded_file)
     
-    if 'Appointment Date/Time (Local Time)' in df_raw.columns:
-        processed_df = pd.DataFrame()
+    if filename.endswith('.xlsx'):
+        df_raw = pd.read_excel(uploaded_file)
+    else:
+        df_raw = pd.read_csv(uploaded_file, low_memory=False)
         
+    processed_df = pd.DataFrame()
+    
+    if 'Contact Address' in df_raw.columns or 'Contact First Name' in df_raw.columns:
+        processed_df['Visit Date'] = df_raw.get('Date Contact was Created (YYY-MM-DD)', '2026-10-01').fillna('2026-10-01')
+        processed_df['Visit Time'] = '09:00'
+        processed_df['Assigned Closer'] = 'Field Team'
+        
+        fname = df_raw['Contact First Name'].fillna('') if 'Contact First Name' in df_raw.columns else ''
+        lname = df_raw['Contact Last Name'].fillna('') if 'Contact Last Name' in df_raw.columns else ''
+        processed_df['Client Name'] = (fname + ' ' + lname).str.strip().replace('', 'Lead Client')
+        
+        processed_df['Full Address'] = df_raw.get('Contact Address', '').astype(str) + ', ' + df_raw.get('City', '').astype(str) + ', ' + df_raw.get('State', '').astype(str) + ' ' + df_raw.get('Zip', '').astype(str)
+        processed_df['Phone Number'] = df_raw.get('Contact Phone', 'N/A')
+        processed_df['Contact Status'] = df_raw.get('Contact Status', 'Pending')
+        processed_df['Notes'] = df_raw.get('Notes', 'N/A')
+        
+        processed_df['lat'] = pd.to_numeric(df_raw.get('Contact Latitude'), errors='coerce').fillna(29.998)
+        processed_df['lon'] = pd.to_numeric(df_raw.get('Contact Longitude'), errors='coerce').fillna(-95.263)
+        return processed_df
+        
+    elif 'Appointment Date/Time (Local Time)' in df_raw.columns:
         dt_local = pd.to_datetime(df_raw['Appointment Date/Time (Local Time)'], errors='coerce')
-        processed_df['Visit Date'] = dt_local.dt.strftime('%Y-%m-%d').fillna('2026-09-24')
+        processed_df['Visit Date'] = dt_local.dt.strftime('%Y-%m-%d').fillna('2026-10-01')
         processed_df['Visit Time'] = dt_local.dt.strftime('%H:%M').fillna('09:00')
         
         closer_first = df_raw['Closer First Name'].fillna('') if 'Closer First Name' in df_raw.columns else ''
         closer_last = df_raw['Closer Last Name'].fillna('') if 'Closer Last Name' in df_raw.columns else ''
-        processed_df['Assigned Closer'] = (closer_first + ' ' + closer_last).str.strip()
-        processed_df['Assigned Closer'] = processed_df['Assigned Closer'].replace('', 'Juan Lopez')
+        processed_df['Assigned Closer'] = (closer_first + ' ' + closer_last).str.strip().replace('', 'Juan Lopez')
         
         fname = df_raw['First Name'].fillna('') if 'First Name' in df_raw.columns else ''
         lname = df_raw['Last Name'].fillna('') if 'Last Name' in df_raw.columns else ''
-        processed_df['Client Name'] = (fname + ' ' + lname).str.strip()
-        processed_df['Client Name'] = processed_df['Client Name'].replace('', 'Repcard Client')
+        processed_df['Client Name'] = (fname + ' ' + lname).str.strip().replace('', 'Repcard Client')
         
-        # Smart Address Rescue from Appointment, Contact Address or Notes
         direcciones = []
         for _, row in df_raw.iterrows():
             full_name = f"{row.get('First Name', '')} {row.get('Last Name', '')}".strip().lower()
-            
             appt = str(row.get('Appointment Address', '')).strip()
             if appt and appt.lower() != 'nan' and appt.lower() != full_name:
                 direcciones.append(appt)
                 continue
-                
             contact = str(row.get('Contact Address', '')).strip()
             if contact and contact.lower() != 'nan' and contact.lower() != full_name:
                 direcciones.append(contact)
                 continue
-                
             notes = str(row.get('Appointment Notes', ''))
             match = re.search(r'Address:\s*([^\n]+)', notes, re.IGNORECASE)
             if match:
                 direcciones.append(match.group(1).strip())
                 continue
-                
             direcciones.append('Houston, TX')
             
         processed_df['Full Address'] = direcciones
         processed_df['Phone Number'] = df_raw.get('Phone', 'N/A')
+        processed_df['Contact Status'] = 'Appointment Scheduled'
+        processed_df['Notes'] = df_raw.get('Appointment Notes', 'N/A')
         
-        lats, lons = [], []
-        for _, row in df_raw.iterrows():
-            lat = pd.to_numeric(row.get('Latitude'), errors='coerce')
-            lon = pd.to_numeric(row.get('Longitude'), errors='coerce')
-            if pd.isna(lat) or pd.isna(lon):
-                addr = processed_df.loc[_, 'Full Address']
-                if 'manvel' in addr.lower():
-                    lats.append(29.5169)
-                    lons.append(-95.3853)
-                else:
-                    lats.append(29.7604)
-                    lons.append(-95.3698)
-            else:
-                lats.append(lat)
-                lons.append(lon)
-                
-        processed_df['lat'] = lats
-        processed_df['lon'] = lons
+        processed_df['lat'] = pd.to_numeric(df_raw.get('Latitude'), errors='coerce').fillna(29.7604)
+        processed_df['lon'] = pd.to_numeric(df_raw.get('Longitude'), errors='coerce').fillna(-95.3698)
         return processed_df
+        
     return df_raw
 
-# Automatic Default CSV Preload
+# Preload default Excel file if available
 if st.session_state['master_df'] is None:
-    default_csv = "Appointment list Sep-24-2026 to Sep-26-2026.csv"
-    if os.path.exists(default_csv):
+    default_excel = "HUMBLE LEADS FOR MR. VIVAS.xlsx"
+    if os.path.exists(default_excel):
         try:
-            st.session_state['master_df'] = procesar_csv_repcard(default_csv)
+            st.session_state['master_df'] = procesar_archivo_datos(default_excel)
         except Exception:
             pass
 
@@ -122,8 +125,16 @@ def crear_icono_svg(numero):
         "anchorX": 24
     }
 
+def calcular_distancia_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    return R * c
+
 # ==========================================
-# SECURE LOGIN SCREEN
+# SECURE LOGIN SCREEN (ENGLISH)
 # ==========================================
 if not st.session_state['logged_in']:
     col1, col2, col3 = st.columns([1, 1.4, 1])
@@ -162,7 +173,7 @@ if not st.session_state['logged_in']:
     st.stop()
 
 # ==========================================
-# MAIN APPLICATION
+# MAIN APPLICATION (100% ENGLISH)
 # ==========================================
 user_info = st.session_state['USERS_DB'][st.session_state['current_email']]
 is_admin = (user_info['role'] == 'admin')
@@ -184,14 +195,14 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     
     st.markdown(f"**User:** {user_info['name']}")
-    st.markdown(f"**Role:** {'Administrator' if is_admin else 'Field Closer'}")
+    st.markdown(f"**Role:** {'Administrator' if is_admin else 'Field Closer / Canvasser'}")
     st.markdown(f"**Email:** {st.session_state['current_email']}")
     st.markdown("---")
     
     uploaded_file = None
     if is_admin:
         st.subheader("⚙️ Administration Panel")
-        uploaded_file = st.file_uploader("Update Repcard Report (CSV)", type=["csv"], key="repcard_uploader_v6")
+        uploaded_file = st.file_uploader("Upload Zone Leads List (Excel / CSV)", type=["xlsx", "csv"], key="zone_uploader")
         st.markdown("---")
     else:
         uploaded_file = None
@@ -215,81 +226,82 @@ with st.sidebar:
         st.rerun()
 
 if is_admin and uploaded_file is not None:
-    with open("Appointment list Sep-24-2026 to Sep-26-2026.csv", "wb") as f:
+    filename = uploaded_file.name
+    with open(filename, "wb") as f:
         f.write(uploaded_file.getbuffer())
-    st.session_state['master_df'] = procesar_csv_repcard("Appointment list Sep-24-2026 to Sep-26-2026.csv")
-    st.success("Report successfully updated and globally synced!")
+    st.session_state['master_df'] = procesar_archivo_datos(filename)
+    st.success("Zone leads list successfully updated and globally synced!")
     st.rerun()
 
 # Main Header
 st.markdown("""
     <div style='padding: 20px; background: linear-gradient(90deg, #1a2332 0%, #2b3a4a 100%); border-radius: 10px; color: white; margin-bottom: 20px;'>
-        <h2 style='margin:0; color: white;'>📍 Optimum Home - Route Planner</h2>
-        <p style='margin:5px 0 0 0; color: #b59e67;'>Operational control, satellite geolocation and chronological Repcard agenda</p>
+        <h2 style='margin:0; color: white;'>📍 Optimum Home - Door-to-Door Route Planner</h2>
+        <p style='margin:5px 0 0 0; color: #b59e67;'>Live GPS Proximity Routing, Contact Status Filtering & Satellite Geolocation</p>
     </div>
 """, unsafe_allow_html=True)
 
 df = st.session_state['master_df']
 
 if df is None or len(df) == 0:
-    st.warning("⚠️ **System Awaiting Data:** No routes currently loaded.")
+    st.warning("⚠️ **System Awaiting Data:** No zone leads currently loaded.")
     if is_admin:
-        st.info("💡 As Administrator, upload the exported CSV file from **Repcard** in the sidebar.")
+        st.info("💡 As Administrator, upload the zone Excel list in the sidebar.")
     else:
-        st.markdown("### The Administrator has not loaded today's routes yet.")
+        st.markdown("### The Administrator has not loaded today's zone list yet.")
 else:
     if 'Assigned Closer' not in df.columns:
-        df['Assigned Closer'] = user_info['name']
-    if 'Visit Date' not in df.columns:
-        df['Visit Date'] = '2026-09-24'
-    if 'Visit Time' not in df.columns:
-        df['Visit Time'] = '09:00'
+        df['Assigned Closer'] = 'Field Team'
+    if 'Contact Status' not in df.columns:
+        df['Contact Status'] = 'Pending'
 
     if is_admin:
         st.sidebar.markdown("---")
         st.sidebar.subheader("🔍 Admin Filters")
-        dates_available = sorted(df['Visit Date'].unique())
-        filter_date = st.sidebar.selectbox("Filter Date:", ["All"] + list(dates_available))
-        
-        closers_available = sorted(df['Assigned Closer'].unique())
-        filter_closer = st.sidebar.selectbox("Filter Closer:", ["All"] + list(closers_available))
+        statuses = ["All"] + sorted(df['Contact Status'].dropna().unique().tolist())
+        filter_status = st.sidebar.selectbox("Filter Contact Status:", statuses)
         
         df_filtered = df.copy()
-        if filter_date != "All":
-            df_filtered = df_filtered[df_filtered['Visit Date'] == filter_date]
-        if filter_closer != "All":
-            df_filtered = df_filtered[df_filtered['Assigned Closer'] == filter_closer]
-            
-        df_filtered = df_filtered.sort_values(by=['Visit Date', 'Visit Time'])
+        if filter_status != "All":
+            df_filtered = df_filtered[df_filtered['Contact Status'] == filter_status]
     else:
-        df_closer = df[df['Assigned Closer'].str.lower() == user_info['name'].lower()]
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("📍 Field GPS & Filters")
         
-        if len(df_closer) > 0:
-            dates_closer = sorted(df_closer['Visit Date'].unique())
-            filter_date_closer = st.selectbox("📅 Select Route Date:", dates_closer)
+        statuses = ["All"] + sorted(df['Contact Status'].dropna().unique().tolist())
+        filter_status = st.sidebar.selectbox("Filter Contact Status:", statuses)
+        
+        use_gps = st.sidebar.checkbox("🧭 Sort by Nearest Proximity (GPS)", value=True, help="Automatically sorts stops starting from your current street location.")
+        
+        user_lat = st.sidebar.number_input("My Current Latitude", value=29.998, format="%.5f")
+        user_lon = st.sidebar.number_input("My Current Longitude", value=-95.263, format="%.5f")
+        
+        df_filtered = df.copy()
+        if filter_status != "All":
+            df_filtered = df_filtered[df_filtered['Contact Status'] == filter_status]
             
-            df_filtered = df_closer[df_closer['Visit Date'] == filter_date_closer].sort_values(by='Visit Time')
-        else:
-            df_filtered = pd.DataFrame()
+        if use_gps and len(df_filtered) > 0:
+            df_filtered['Distance_km'] = df_filtered.apply(lambda r: calcular_distancia_km(user_lat, user_lon, r['lat'], r['lon']), axis=1)
+            df_filtered = df_filtered.sort_values(by='Distance_km')
 
     col_m1, col_m2, col_m3 = st.columns(3)
     with col_m1:
-        st.metric("Scheduled Stops", len(df_filtered))
+        st.metric("Total Zone Leads", len(df_filtered))
     with col_m2:
-        st.metric("Active Closer", user_info['name'])
+        st.metric("Active Field User", user_info['name'])
     with col_m3:
-        st.metric("Sequence", "Chronological Repcard")
+        st.metric("Routing Mode", "Door-to-Door Proximity")
 
     st.markdown("---")
 
     if len(df_filtered) == 0:
-        st.info("No records assigned for the selected filters.")
+        st.info("No records found for the selected filters.")
     else:
         # --- INTERACTIVE MAP ---
         valid_coords = df_filtered.dropna(subset=['lat', 'lon'])
         if len(valid_coords) > 0:
-            st.subheader("🗺️ Repcard Route Satellite Map")
-            st.markdown("Exact locations obtained from Repcard coordinates, numbered chronologically:")
+            st.subheader("🗺️ Zone Satellite Map & Proximity Pins")
+            st.markdown("Pins are ordered dynamically by distance from your current position or list sequence:")
             
             df_map = valid_coords.reset_index(drop=True).copy()
             df_map['Sequence_Num'] = range(1, len(df_map) + 1)
@@ -311,7 +323,7 @@ else:
             view_state = pdk.ViewState(
                 latitude=lat_centro,
                 longitude=lon_centro,
-                zoom=11,
+                zoom=13,
                 pitch=0
             )
 
@@ -320,7 +332,7 @@ else:
                 initial_view_state=view_state,
                 map_style=pdk.map_styles.LIGHT,
                 tooltip={
-                    "html": "<b>Stop #{Sequence_Num}</b><br/>Time: {Visit Time}<br/>Client: {Client Name}<br/>Address: {Full Address}",
+                    "html": "<b>Stop #{Sequence_Num}</b><br/>Client: {Client Name}<br/>Status: {Contact Status}<br/>Address: {Full Address}",
                     "style": {
                         "backgroundColor": "#1a2332",
                         "color": "white",
@@ -332,36 +344,36 @@ else:
             st.pydeck_chart(deck)
             st.markdown("---")
 
-        st.subheader("📋 Chronological Stop Sequence")
-        cols_to_show = [c for c in ['Visit Date', 'Visit Time', 'Assigned Closer', 'Client Name', 'Full Address', 'Phone Number'] if c in df_filtered.columns]
+        st.subheader("📋 Zone Leads Chronological Sequence")
+        cols_to_show = [c for c in ['Contact Status', 'Client Name', 'Full Address', 'Phone Number', 'Notes'] if c in df_filtered.columns]
         df_display = df_filtered[cols_to_show].copy()
         df_display.insert(0, 'Sequence', range(1, len(df_display) + 1))
         st.dataframe(df_display, use_container_width=True, hide_index=True)
 
         st.markdown("---")
 
-        st.subheader("🔍 Visit Details & Individual Navigation")
-        visit_options = [f"Stop #{i+1} [{row.get('Visit Time','')}] - {row.get('Client Name', 'Client')}" for i, row in df_filtered.reset_index(drop=True).iterrows()]
-        selected_visit = st.selectbox("Select a client to manage the visit:", visit_options)
+        st.subheader("🔍 Lead Detail & Field Navigation")
+        lead_options = [f"Stop #{i+1} [{row.get('Contact Status','Pending')}] - {row.get('Client Name', 'Client')} ({row.get('Full Address','')})" for i, row in df_filtered.reset_index(drop=True).iterrows()]
+        selected_lead = st.selectbox("Select a property to visit:", lead_options)
 
-        if selected_visit:
-            idx = visit_options.index(selected_visit)
-            client_sel = df_filtered.reset_index(drop=True).iloc[idx]
+        if selected_lead:
+            idx = lead_options.index(selected_lead)
+            lead_sel = df_filtered.reset_index(drop=True).iloc[idx]
             
             col_det1, col_det2 = st.columns(2)
             with col_det1:
-                st.markdown(f"**Route Sequence:** #{idx + 1}")
-                st.markdown(f"**Agreed Time:** ⏰ {client_sel.get('Visit Time', 'N/A')}")
-                st.markdown(f"**Client:** {client_sel.get('Client Name', 'N/A')}")
-                st.markdown(f"**Address:** {client_sel.get('Full Address', 'N/A')}")
+                st.markdown(f"**Route Stop:** #{idx + 1}")
+                st.markdown(f"**Contact Status:** 📌 {lead_sel.get('Contact Status', 'N/A')}")
+                st.markdown(f"**Client Name:** {lead_sel.get('Client Name', 'N/A')}")
+                st.markdown(f"**Property Address:** {lead_sel.get('Full Address', 'N/A')}")
             with col_det2:
-                st.markdown(f"**Assigned Closer:** {client_sel.get('Assigned Closer', 'N/A')}")
-                st.markdown(f"**Phone:** {client_sel.get('Phone Number', 'N/A')}")
-                st.markdown(f"**Current Status:** Pending")
+                st.markdown(f"**Phone Number:** {lead_sel.get('Phone Number', 'N/A')}")
+                st.markdown(f"**Lead Notes:** {lead_sel.get('Notes', 'N/A')}")
+                st.markdown(f"**Visit Status:** Active / Pending")
 
-            st.markdown("#### Open route application (Navigation):")
+            st.markdown("#### Open Navigation App:")
             
-            dir_url = str(client_sel.get('Full Address', '')).replace(' ', '+')
+            dir_url = str(lead_sel.get('Full Address', '')).replace(' ', '+')
             
             col_btn1, col_btn2, col_btn3 = st.columns(3)
             with col_btn1:
